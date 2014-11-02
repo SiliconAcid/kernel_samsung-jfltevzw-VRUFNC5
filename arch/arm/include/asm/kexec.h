@@ -1,7 +1,7 @@
 #ifndef _ARM_KEXEC_H
 #define _ARM_KEXEC_H
 
-#ifdef CONFIG_KEXEC
+//#ifdef CONFIG_KEXEC
 
 /* Maximum physical address we can use pages from */
 #define KEXEC_SOURCE_MEMORY_LIMIT (-1UL)
@@ -16,6 +16,10 @@
 
 #define KEXEC_ARM_ATAGS_OFFSET  0x1000
 #define KEXEC_ARM_ZIMAGE_OFFSET 0x8000
+
+#ifdef CONFIG_KEXEC_HARDBOOT
+#define KEXEC_HB_PAGE_MAGIC 0x4a5db007
+#endif
 
 #ifndef __ASSEMBLY__
 
@@ -53,8 +57,12 @@ static inline void crash_setup_regs(struct pt_regs *newregs,
 /* Function pointer to optional machine-specific reinitialization */
 extern void (*kexec_reinit)(void);
 
+#ifdef CONFIG_KEXEC_HARDBOOT
+extern void (*kexec_hardboot_hook)(void);
+#endif
+
 #endif /* __ASSEMBLY__ */
 
-#endif /* CONFIG_KEXEC */
+//#endif /* CONFIG_KEXEC */
 
 #endif /* _ARM_KEXEC_H */

@@ -9,7 +9,12 @@
  * published by the Free Software Foundation.
  */
 #include <linux/linkage.h>
-
+#include <asm/memory.h>
+#include <asm/assembler.h>
+#ifdef CONFIG_KEXEC_HARDBOOT
+  #include <asm/kexec.h>
+#endif
+	.arch	armv7-a
 /*
  * Debugging stuff
  *
@@ -134,6 +139,98 @@ start:
  THUMB(		.thumb			)
 1:		mov	r7, r1			@ save architecture ID
 		mov	r8, r2			@ save atags pointer
+
+#ifdef CONFIG_KEXEC_HARDBOOT
+		/* Check hardboot page for a kexec kernel. */
+		ldr	r3, =KEXEC_HB_PAGE_ADDR
+		ldr	r0, [r3]
+		ldr	r1, =KEXEC_HB_PAGE_MAGIC
+		teq	r0, r1
+		bne	not_booting_other
+
+		/* Clear hardboot page magic to avoid boot loop. */
+		mov	r0, #0
+		str	r0, [r3]
+
+/* Copy the kernel tagged list (atags):
+ *
+ * The kernel requires atags to be located in a direct-mapped region,
+ * usually below the kernel in the first 16 kB of RAM.  If they're above
+ * (the start of) the kernel, they need to be copied to a suitable
+ * location, e.g., the machine-defined params_phys.
+ *
+ * The assumption is that the tags will only be "out of place" if the
+ * decompressor code is also, so copying is implemented only in the "won't
+ * overwrite" case (which should be fixed).  Still need to make sure that
+ * the copied tags don't overwrite either the kernel or decompressor code
+ * (or rather, the remainder of it since everything up to here has already
+ * been executed).
+ *
+ * Vojtech Bocek <vbocek@gmail.com>: I've moved atags copying from guest kernel to
+ * the host and rewrote it from C to assembler in order to remove the need
+ * for guest kernel to be patched. I don't know assembler very well, so it
+ * doesn't look very good and I have no idea if I didn't accidentally break
+ * something, causing problems down the road. It's worked every time and I
+ * didn't notice any problem so far though.
+ *
+ * r4: zreladdr (kernel start)
+ * r8: kexec_boot_atags
+ * r2: boot_atags */
+		ldr	r8, [r3, #12]			@ kexec_boot_atags (r2: boot_atags)
+		ldr	r4, =zreladdr			@ zreladdr
+
+		/* No need to copy atags if they're already below kernel */
+		cmp	r8, r4
+		blo	no_atags_cpy
+
+		/* r0: min(zreladdr, pc) */
+		mov	r0, pc
+		cmp	r4, r0
+		movlo	r0, r4
+
+		/* Compute max space for atags, if max <= 0 don't copy. */
+		subs	r5, r0, r2			@ max = min(zreladdr, pc) - dest
+		bls	no_atags_cpy
+
+		/* Copy atags to params_phys. */
+		/* r8 src, r2 dest, r5 max */
+
+		ldr	r0, [r8]				@ first tag size
+		cmp	r0, #0
+		moveq	r4, #8
+		beq	catags_empty
+		mov	r4, r8
+
+catags_foreach:
+		lsl	r0, r0, #2				@ Multiply by 4
+		ldr	r0, [r4, r0]!			@ Load next tag size to r0 and address to r4
+		cmp	r0, #0
+		bne	catags_foreach
+
+		rsb	r4, r8, r4				@ r4 -= r8 (get only size)
+		add	r4, r4, #8				@ add size of the last tag
+catags_empty:
+		cmp	r5, r4					@ if(max <= size)
+		bcc	no_atags_cpy
+
+		mov	r5, #0					@ iterator
+catags_cpy:
+		ldr	r0, [r8, r5]
+		str	r0, [r2, r5]
+		add	r5, r5, #4
+		cmp	r5, r4
+		blo	catags_cpy
+
+no_atags_cpy:
+		/* Load boot arguments and jump to kexec kernel. */
+		ldr	r0, [r3, #12]			@ kexec_boot_atags (r2: boot_atags)
+		ldr	r1, [r3, #8]			@ kexec_mach_type
+		ldr	pc, [r3, #4]			@ kexec_start_address
+
+		.ltorg
+
+not_booting_other:
+#endif
 
 #ifndef __ARM_ARCH_2__
 		/*
@@ -390,11 +487,9 @@ wont_overwrite:
  *   sp  = stack pointer
  */
 		orrs	r1, r0, r5
-#ifndef CONFIG_CRYPTO_FIPS
+
 		beq	not_relocated
-#else
-        beq not_relocated_copy
-#endif
+
 		add	r11, r11, r0
 		add	r12, r12, r0
 
@@ -407,9 +502,7 @@ wont_overwrite:
 		add	r2, r2, r0
 		add	r3, r3, r0
 
-#ifdef CONFIG_CRYPTO_FIPS
-        bl copy_compressed
-#endif
+
 		/*
 		 * Relocate all entries in the GOT table.
 		 * Bump bss entries to _edata + dtb size
@@ -462,6 +555,44 @@ not_relocated:	mov	r0, #0
 		add	r2, sp, #0x10000	@ 64k max
 		mov	r3, r7
 		bl	decompress_kernel
+
+/* Copy the kernel tagged list (atags):
+ *
+ * The kernel requires atags to be located in a direct-mapped region,
+ * usually below the kernel in the first 16 kB of RAM.  If they're above
+ * (the start of) the kernel, they need to be copied to a suitable
+ * location, e.g., the machine-defined params_phys.
+ *
+ * The assumption is that the tags will only be "out of place" if the
+ * decompressor code is also, so copying is implemented only in the "won't
+ * overwrite" case (which should be fixed).  Still need to make sure that
+ * the copied tags don't overwrite either the kernel or decompressor code
+ * (or rather, the remainder of it since everything up to here has already
+ * been executed).
+ *
+ * r4: zreladdr (kernel start)
+ * r8: atags */
+
+		/* Don't need to copy atags if they're already below the kernel. */
+		cmp	r8, r4
+		blo	call_kernel
+
+		/* r1: min(zreladdr, pc) */
+		mov	r1, pc
+		cmp	r4, r1
+		movlo	r1, r4
+
+		/* Compute max space for atags, if max <= 0 don't copy. */
+		ldr	r0, =params_phys	@ dest
+		subs	r2, r1, r0		@ max = min(zreladdr, pc) - dest
+		bls	call_kernel
+
+		/* Copy atags to params_phys. */
+		mov	r1, r8			@ src
+		bl	copy_atags
+		mov	r8, r0
+
+call_kernel:
 		bl	cache_clean_flush
 		bl	cache_off
 		mov	r0, #0			@ must be zero
@@ -469,6 +600,27 @@ not_relocated:	mov	r0, #0
 		mov	r2, r8			@ restore atags pointer
  ARM(		mov	pc, r4	)		@ call kernel
  THUMB(		bx	r4	)		@ entry point is always ARM
+
+#ifdef CONFIG_ARM_VIRT_EXT
+		mrs	r0, spsr		@ Get saved CPU boot mode
+		and	r0, r0, #MODE_MASK
+		cmp	r0, #HYP_MODE		@ if not booted in HYP mode...
+		bne	__enter_kernel		@ boot kernel directly
+
+		adr	r12, .L__hyp_reentry_vectors_offset
+		ldr	r0, [r12]
+		add	r0, r0, r12
+
+		bl	__hyp_set_vectors
+		__HVC(0)			@ otherwise bounce to hyp mode
+
+		b	.			@ should never be reached
+
+		.align	2
+.L__hyp_reentry_vectors_offset:	.long	__hyp_reentry_vectors - .
+#else
+		b	__enter_kernel
+#endif
 
 		.align	2
 		.type	LC0, #object
@@ -488,46 +640,6 @@ params:		ldr	r0, =0x10000100		@ params_phys for RPC
 		mov	pc, lr
 		.ltorg
 		.align
-#endif
-
-/*
- * change@ksingh.sra-dallas - Copying the zImage to a secure location 
- * this copy will be used to computer integrity for FIPS validation
- */
-#ifdef CONFIG_CRYPTO_FIPS
-not_relocated_copy:
-		bl copy_compressed
-		b not_relocated
-
-copy_compressed:
-		// preserve the registers
-		PUSH {r1, r2, r4, r8, r9, r10}
-
-		// source address - zImage load address
-		movw r1, #:lower16:FIPS_KERNEL_RAM_BASE
-		movt r1, #:upper16:FIPS_KERNEL_RAM_BASE
-
-		// destination address - location where zImage copy will be made
-		movw r9, #:lower16:CONFIG_CRYPTO_FIPS_INTEG_COPY_ADDRESS
-	        movt r9, #:upper16:CONFIG_CRYPTO_FIPS_INTEG_COPY_ADDRESS
-
-1:
-		// makes the copy of zImage
-		ldmia	r1!, {r10}
-		stmia	r9!, {r10}
-		cmp	r1, r2
-		blo	1b
-
-		// copy the padded hash of zImage
-		.rept 8
-		ldmia	r1!, {r10}
-		stmia	r9!, {r10}
-		.endr
-
-		// restore the registers
-		POP {r1, r2, r4, r8, r9, r10}
-		// go back to where we came from
-		mov	pc, lr
 #endif
 
 /*
@@ -627,9 +739,14 @@ __setup_mmu:	sub	r3, r4, #16384		@ Page directory size
  * bits for the RAM area only.
  */
 		mov	r0, r3
+#if defined(PLAT_PHYS_OFFSET) && defined(END_MEM)
+		mov  r9, #PLAT_PHYS_OFFSET  @ start of RAM
+		ldr  r10, =END_MEM    @ end of RAM
+#else
 		mov	r9, r0, lsr #18
 		mov	r9, r9, lsl #18		@ start of RAM
 		add	r10, r9, #0x10000000	@ a reasonable RAM size
+#endif
 		mov	r1, #0x12		@ XN|U + section mapping
 		orr	r1, r1, #3 << 10	@ AP=11
 		add	r2, r3, #16384
@@ -659,6 +776,15 @@ __setup_mmu:	sub	r3, r4, #16384		@ Page directory size
 		str	r1, [r0]
 		mov	pc, lr
 ENDPROC(__setup_mmu)
+
+@ Enable unaligned access on v6, to allow better code generation
+@ for the decompressor C code:
+__armv6_mmu_cache_on:
+		mrc	p15, 0, r0, c1, c0, 0	@ read SCTLR
+		bic	r0, r0, #2		@ A (no unaligned access fault)
+		orr	r0, r0, #1 << 22	@ U (v6 unaligned access model)
+		mcr	p15, 0, r0, c1, c0, 0	@ write SCTLR
+		b	__armv4_mmu_cache_on
 
 __arm926ejs_mmu_cache_on:
 #ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
@@ -699,16 +825,26 @@ __armv7_mmu_cache_on:
 		mcrne	p15, 0, r0, c8, c7, 0	@ flush I,D TLBs
 #endif
 		mrc	p15, 0, r0, c1, c0, 0	@ read control reg
+		bic	r0, r0, #1 << 28	@ clear SCTLR.TRE
 		orr	r0, r0, #0x5000		@ I-cache enable, RR cache replacement
 		orr	r0, r0, #0x003c		@ write buffer
+		bic	r0, r0, #2		@ A (no unaligned access fault)
+		orr	r0, r0, #1 << 22	@ U (v6 unaligned access model)
+						@ (needed for ARM1176)
 #ifdef CONFIG_MMU
 #ifdef CONFIG_CPU_ENDIAN_BE8
 		orr	r0, r0, #1 << 25	@ big-endian page tables
 #endif
+		mrcne   p15, 0, r6, c2, c0, 2   @ read ttb control reg
 		orrne	r0, r0, #1		@ MMU enabled
 		movne	r1, #0xfffffffd		@ domain 0 = client
+		bic     r6, r6, #1 << 31        @ 32-bit translation system
+		bic     r6, r6, #3 << 0         @ use only ttbr0
 		mcrne	p15, 0, r3, c2, c0, 0	@ load page table pointer
+		mcrne	p15, 0, r0, c8, c7, 0	@ flush I,D TLBs
+		mcr	p15, 0, r0, c7, c5, 4	@ ISB
 		mcrne	p15, 0, r1, c3, c0, 0	@ load domain access control
+		mcrne   p15, 0, r6, c2, c0, 2   @ load ttb control
 #endif
 		mcr	p15, 0, r0, c7, c5, 4	@ ISB
 		mcr	p15, 0, r0, c1, c0, 0	@ load control register
@@ -833,8 +969,10 @@ proc_types:
 
 		.word	0x41007000		@ ARM7/710
 		.word	0xfff8fe00
-		W(b)	__arm7_mmu_cache_off
-		W(b)	__arm7_mmu_cache_off
+		mov	pc, lr
+ THUMB(		nop				)
+		mov	pc, lr
+ THUMB(		nop				)
 		mov	pc, lr
  THUMB(		nop				)
 
@@ -941,7 +1079,7 @@ proc_types:
 
 		.word	0x0007b000		@ ARMv6
 		.word	0x000ff000
-		W(b)	__armv4_mmu_cache_on
+		W(b)	__armv6_mmu_cache_on
 		W(b)	__armv4_mmu_cache_off
 		W(b)	__armv6_mmu_cache_flush
 
@@ -1276,6 +1414,25 @@ memdump:	mov	r12, r0
 #endif
 
 		.ltorg
+
+#ifdef CONFIG_ARM_VIRT_EXT
+.align 5
+__hyp_reentry_vectors:
+		W(b)	.			@ reset
+		W(b)	.			@ undef
+		W(b)	.			@ svc
+		W(b)	.			@ pabort
+		W(b)	.			@ dabort
+		W(b)	__enter_kernel		@ hyp
+		W(b)	.			@ irq
+		W(b)	.			@ fiq
+#endif /* CONFIG_ARM_VIRT_EXT */
+
+__enter_kernel:
+		mov	r0, #0			@ must be 0
+ ARM(		mov	pc, r4	)		@ call kernel
+ THUMB(		bx	r4	)		@ entry point is always ARM
+
 reloc_code_end:
 
 		.align

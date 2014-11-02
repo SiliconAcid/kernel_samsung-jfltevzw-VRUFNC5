@@ -299,6 +299,7 @@ __setup("reboot=", reboot_setup);
 
 void machine_shutdown(void)
 {
+	disable_nonboot_cpus();
 	preempt_disable();
 #ifdef CONFIG_SMP
 	/*

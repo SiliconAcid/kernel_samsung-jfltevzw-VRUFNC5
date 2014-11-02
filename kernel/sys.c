@@ -544,8 +544,28 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 
 #ifdef CONFIG_KEXEC
 	case LINUX_REBOOT_CMD_KEXEC:
-		ret = kernel_kexec();
+	{
+		struct kimage *image;
+		if (arg) {
+			unlock_kernel();
+			return -EINVAL;
+		}
+		image = xchg(&kexec_image, 0);
+		if (!image) {
+			unlock_kernel();
+			return -EINVAL;
+		}
+		notifier_call_chain(&reboot_notifier_list, SYS_RESTART, NULL);
+		system_running = 0;
+		device_shutdown();
+		printk(KERN_EMERG "Starting new kernel\n");
+		machine_kexec(image);
 		break;
+	}
+#endif
+ #ifdef CONFIG_SOFTWARE_SUSPEND
+ 	case LINUX_REBOOT_CMD_SW_SUSPEND:
+ 		if (!software_suspend_enabled) {
 #endif
 
 #ifdef CONFIG_HIBERNATION

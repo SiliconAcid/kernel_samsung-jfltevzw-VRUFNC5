@@ -6,6 +6,7 @@
  * Version 2.  See the file COPYING for more details.
  */
 
+#include <linux/module.h>
 #include <linux/capability.h>
 #include <linux/mm.h>
 #include <linux/file.h>
@@ -33,11 +34,21 @@
 #include <linux/vmalloc.h>
 #include <linux/swap.h>
 #include <linux/syscore_ops.h>
+#include <linux/kallsyms.h>
 
 #include <asm/page.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/sections.h>
+
+#include <linux/device.h>
+#include <linux/miscdevice.h>
+#include "kexec-dev.h"
+
+#define DRV_NAME	"kexecd"
+#define DRV_VERSION	"1.0"
+#define DRV_DESCRIPTION	"KEXEC device driver"
+
 
 /* Per cpu memory for storing cpu states in case of system crash. */
 note_buf_t __percpu *crash_notes;
@@ -48,6 +59,9 @@ u32 vmcoreinfo_note[VMCOREINFO_NOTE_SIZE/4];
 size_t vmcoreinfo_size;
 size_t vmcoreinfo_max_size = sizeof(vmcoreinfo_data);
 
+/* lookup functions */
+void (*kernel_restart_prepare_ptr)(char *);
+
 /* Location of the reserved area for the crash kernel */
 struct resource crashk_res = {
 	.name  = "Crash kernel",
@@ -56,12 +70,14 @@ struct resource crashk_res = {
 	.flags = IORESOURCE_BUSY | IORESOURCE_MEM
 };
 
+#ifdef CONFIG_KEXEC
 int kexec_should_crash(struct task_struct *p)
 {
 	if (in_interrupt() || !p->pid || is_global_init(p) || panic_on_oops)
 		return 1;
 	return 0;
 }
+#endif
 
 /*
  * When kexec transitions to the new kernel there is a one-to-one
@@ -1078,6 +1094,7 @@ asmlinkage long compat_sys_kexec_load(unsigned long entry,
 }
 #endif
 
+#ifdef CONFIG_KEXEC
 void crash_kexec(struct pt_regs *regs)
 {
 	/* Take the kexec_mutex here to prevent sys_kexec_load
@@ -1100,6 +1117,7 @@ void crash_kexec(struct pt_regs *regs)
 		mutex_unlock(&kexec_mutex);
 	}
 }
+#endif
 
 size_t crash_get_memory_size(void)
 {
@@ -1124,6 +1142,7 @@ void __weak crash_free_reserved_phys_range(unsigned long begin,
 	}
 }
 
+#if 0
 int crash_shrink_memory(unsigned long new_size)
 {
 	int ret = 0;
@@ -1174,6 +1193,7 @@ unlock:
 	mutex_unlock(&kexec_mutex);
 	return ret;
 }
+#endif
 
 static u32 *append_elf_note(u32 *buf, char *name, unsigned type, void *data,
 			    size_t data_len)
@@ -1229,6 +1249,7 @@ void crash_save_cpu(struct pt_regs *regs, int cpu)
 	final_note(buf);
 }
 
+#if 0
 static int __init crash_notes_memory_init(void)
 {
 	/* Allocate memory for saving cpu registers. */
@@ -1241,6 +1262,7 @@ static int __init crash_notes_memory_init(void)
 	return 0;
 }
 module_init(crash_notes_memory_init)
+#endif
 
 
 /*
@@ -1458,6 +1480,7 @@ unsigned long __attribute__ ((weak)) paddr_vmcoreinfo_note(void)
 	return __pa((unsigned long)(char *)&vmcoreinfo_note);
 }
 
+#if 0
 static int __init crash_save_vmcoreinfo_init(void)
 {
 	VMCOREINFO_OSRELEASE(init_uts_ns.name.release);
@@ -1521,6 +1544,27 @@ static int __init crash_save_vmcoreinfo_init(void)
 }
 
 module_init(crash_save_vmcoreinfo_init)
+#endif
+
+static void kexec_info(struct kimage *image)
+{
+	int i;
+	printk("kexec information\n");
+	if (image) {
+		for (i = 0; i < image->nr_segments; i++) {
+			printk("  segment[%d]: 0x%08x - 0x%08x (0x%08x)\n",
+			       i,
+			       (unsigned int)image->segment[i].mem,
+			       (unsigned int)image->segment[i].mem +
+					     image->segment[i].memsz,
+			       (unsigned int)image->segment[i].memsz);
+		}
+		printk("  start     : 0x%08x\n", (unsigned int)image->start);
+		printk("  atags     : 0x%08x\n", (unsigned int)image->start - KEXEC_ARM_ZIMAGE_OFFSET + KEXEC_ARM_ATAGS_OFFSET);
+	}
+	else
+		printk("no kernel image loaded\n");
+}
 
 /*
  * Move into place and start executing a preloaded standalone
@@ -1530,6 +1574,7 @@ int kernel_kexec(void)
 {
 	int error = 0;
 
+	printk("kernel_kexec: BEGIN\n");
 	if (!mutex_trylock(&kexec_mutex))
 		return -EBUSY;
 	if (!kexec_image) {
@@ -1570,11 +1615,20 @@ int kernel_kexec(void)
 	} else
 #endif
 	{
-		kernel_restart_prepare(NULL);
-		printk(KERN_EMERG "Starting new kernel\n");
+		printk(KERN_EMERG "KEXEC: preempt_disable\n");
+		preempt_disable();
+
+		printk(KERN_EMERG "KEXEC: disable interrupts\n");
+		local_irq_disable();
+		local_fiq_disable();
+
+		printk(KERN_EMERG "KEXEC: kernel_restart_prepare_ptr\n");
+		kernel_restart_prepare_ptr(NULL);
+		printk(KERN_EMERG "KEXEC: machine_shutdown\n");
 		machine_shutdown();
 	}
 
+	printk(KERN_EMERG "KEXEC: machine_kexec\n");
 	machine_kexec(kexec_image);
 
 #ifdef CONFIG_KEXEC_JUMP
@@ -1600,3 +1654,97 @@ int kernel_kexec(void)
 	mutex_unlock(&kexec_mutex);
 	return error;
 }
+
+static long kexec_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+	int ret;
+	struct kexec_param *data;
+
+	switch (cmd) {
+		case KEXEC_IOC_LOAD:
+		{
+			pr_err("kexec: KEXEC_IOC_LOAD\n");
+			data = (struct kexec_param *)arg;
+//			if (copy_from_user(&data, (void __user *)arg,
+//					   sizeof(struct kexec_param)))
+//				return -EFAULT;
+			ret = sys_kexec_load((unsigned long)data->entry,
+					data->nr_segments,
+					data->segment,
+					data->kexec_flags);
+			if (!ret) kexec_info(kexec_image);
+			return ret;
+		}
+		case KEXEC_IOC_CHECK_LOADED:
+		{
+			pr_err("kexec: KEXEC_IOC_CHECK_LOADED (%d)\n", !!kexec_image);
+			return !!kexec_image;
+		}
+		case KEXEC_IOC_REBOOT:
+		{
+			pr_err("kexec: KEXEC_IOC_REBOOT\n");
+
+			preempt_disable();
+
+			/* Disable interrupts first */
+			local_irq_disable();
+			local_fiq_disable();
+
+//			smp_call_function_single(0, (smp_call_func_t)kernel_kexec, NULL, 1);
+			kernel_kexec();
+
+		}
+		default:
+			return -ENOTTY;
+	}
+	return 0;
+}
+
+static const struct file_operations kexec_fops = {
+	.owner          = THIS_MODULE,
+	.unlocked_ioctl = kexec_ioctl,
+};
+
+static struct miscdevice kexec_miscdev = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "kexec",
+	.fops = &kexec_fops,
+	.parent = NULL,
+	.nodename = "kexec",
+};
+
+static int __init kexec_init(void)
+{
+	int ret;
+	/*
+	* We really shouldn't be screwing around with the syscall table.
+	* Instead use /dev/kexec with 2 IOCTL
+	* IOCTL_LOAD(info.entry, info.nr_segments, info.segment, info.kexec_flags)
+	* IOCTL_REBOOT(void)
+	*/
+
+	pr_info("%s, %s\n", DRV_DESCRIPTION, DRV_VERSION);
+	ret = misc_register(&kexec_miscdev);
+	if (ret) {
+		pr_err("kexec: failed to register misc device.\n");
+	}
+
+	kernel_restart_prepare_ptr = (void *)kallsyms_lookup_name("kernel_restart_prepare");
+	if (!kernel_restart_prepare_ptr) {
+		return -1;
+	}
+
+	return ret;
+}
+
+static void __exit kexec_exit(void)
+{
+	misc_deregister(&kexec_miscdev);
+}
+
+module_init(kexec_init)
+module_exit(kexec_exit);
+
+MODULE_DESCRIPTION(DRV_DESCRIPTION);
+MODULE_LICENSE("GPL");
+MODULE_ALIAS_MISCDEV(KEXEC_MINOR);
+MODULE_ALIAS("devname:kexec");

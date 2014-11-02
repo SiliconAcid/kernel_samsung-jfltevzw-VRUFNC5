@@ -62,7 +62,11 @@
 #define KERNEL_START	KERNEL_RAM_VADDR
 #define KERNEL_END	_end
 #endif
-
+#ifdef CONFIG_ALIGNMENT_TRAP
+	orr	r0, r0, #CR_A
+#else
+	bic	r0, r0, #CR_A
+#endif
 /*
  * Kernel startup entry point.
  * ---------------------------

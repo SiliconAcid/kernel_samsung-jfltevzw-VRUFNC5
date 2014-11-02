@@ -1,7 +1,7 @@
 #ifndef LINUX_KEXEC_H
 #define LINUX_KEXEC_H
 
-#ifdef CONFIG_KEXEC
+// #ifdef CONFIG_KEXEC
 #include <linux/types.h>
 #include <linux/list.h>
 #include <linux/linkage.h>
@@ -111,6 +111,10 @@ struct kimage {
 #define KEXEC_TYPE_CRASH   1
 	unsigned int preserve_context : 1;
 
+#ifdef CONFIG_KEXEC_HARDBOOT
+	unsigned int hardboot : 1;
+#endif
+
 #ifdef ARCH_HAS_KIMAGE_ARCH
 	struct kimage_arch arch;
 #endif
@@ -136,8 +140,8 @@ extern asmlinkage long compat_sys_kexec_load(unsigned long entry,
 #endif
 extern struct page *kimage_alloc_control_pages(struct kimage *image,
 						unsigned int order);
-extern void crash_kexec(struct pt_regs *);
-int kexec_should_crash(struct task_struct *);
+//extern void crash_kexec(struct pt_regs *);
+//int kexec_should_crash(struct task_struct *);
 void crash_save_cpu(struct pt_regs *regs, int cpu);
 void crash_save_vmcoreinfo(void);
 void crash_map_reserved_pages(void);
@@ -179,7 +183,9 @@ extern struct kimage *kexec_crash_image;
 #define KEXEC_ON_CRASH		0x00000001
 #define KEXEC_PRESERVE_CONTEXT	0x00000002
 #define KEXEC_ARCH_MASK		0xffff0000
-
+#ifdef CONFIG_KEXEC_HARDBOOT
+#define KEXEC_HARDBOOT		0x00000004
+#endif
 /* These values match the ELF architecture values.
  * Unless there is a good reason that should continue to be the case.
  */
@@ -196,10 +202,14 @@ extern struct kimage *kexec_crash_image;
 #define KEXEC_ARCH_MIPS    ( 8 << 16)
 
 /* List of defined/legal kexec flags */
-#ifndef CONFIG_KEXEC_JUMP
-#define KEXEC_FLAGS    KEXEC_ON_CRASH
-#else
+#if defined(CONFIG_KEXEC_JUMP) && defined(CONFIG_KEXEC_HARDBOOT)
+#define KEXEC_FLAGS    (KEXEC_ON_CRASH | KEXEC_PRESERVE_CONTEXT | KEXEC_HARDBOOT)
+#elif defined(CONFIG_KEXEC_JUMP)
 #define KEXEC_FLAGS    (KEXEC_ON_CRASH | KEXEC_PRESERVE_CONTEXT)
+#elif defined(CONFIG_KEXEC_HARDBOOT)
+#define KEXEC_FLAGS    (KEXEC_ON_CRASH | KEXEC_HARDBOOT)
+#else
+#define KEXEC_FLAGS    (KEXEC_ON_CRASH)
 #endif
 
 #define VMCOREINFO_BYTES           (4096)
@@ -223,10 +233,10 @@ int crash_shrink_memory(unsigned long new_size);
 size_t crash_get_memory_size(void);
 void crash_free_reserved_phys_range(unsigned long begin, unsigned long end);
 
-#else /* !CONFIG_KEXEC */
-struct pt_regs;
-struct task_struct;
+//#else /* !CONFIG_KEXEC */
+//struct pt_regs;
+//struct task_struct;
 static inline void crash_kexec(struct pt_regs *regs) { }
 static inline int kexec_should_crash(struct task_struct *p) { return 0; }
-#endif /* CONFIG_KEXEC */
+//#endif /* CONFIG_KEXEC */
 #endif /* LINUX_KEXEC_H */

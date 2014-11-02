@@ -44,7 +44,7 @@ modules.builtin
 /System.map
 /Module.markers
 /Module.symvers
-
+/arm-eabi-4.7
 #
 # Debian directory (make deb-pkg)
 #
@@ -84,4 +84,5 @@ GTAGS
 *.orig
 *~
 \#*#
+
 
