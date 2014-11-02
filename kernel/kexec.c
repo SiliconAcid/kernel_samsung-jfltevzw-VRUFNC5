@@ -39,6 +39,7 @@
 #include <asm/page.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
+#include <asm/system.h>
 #include <asm/sections.h>
 
 #include <linux/device.h>
@@ -52,6 +53,12 @@
 
 /* Per cpu memory for storing cpu states in case of system crash. */
 note_buf_t __percpu *crash_notes;
+/* Syscall table */
+void **sys_call_table;
+
+/* original and new reboot syscall */
+asmlinkage long (*original_reboot)(int magic1, int magic2, unsigned int cmd, void __user *arg);
+extern asmlinkage long reboot(int magic1, int magic2, unsigned int cmd, void __user *arg);
 
 /* vmcoreinfo stuff */
 static unsigned char vmcoreinfo_data[VMCOREINFO_BYTES];
