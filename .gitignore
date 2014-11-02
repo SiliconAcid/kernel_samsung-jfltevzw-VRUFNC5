@@ -44,7 +44,7 @@ modules.builtin
 /System.map
 /Module.markers
 /Module.symvers
-/arm-eabi-4.7
+arm-eabi-4.7
 #
 # Debian directory (make deb-pkg)
 #
@@ -63,7 +63,7 @@ include/config
 include/linux/version.h
 include/generated
 arch/*/include/generated
-
+arm-eabi-4.7
 # stgit generated dirs
 patches-*
 
