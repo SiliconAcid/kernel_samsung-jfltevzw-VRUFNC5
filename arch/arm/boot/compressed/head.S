@@ -11,9 +11,9 @@
 #include <linux/linkage.h>
 #include <asm/memory.h>
 #include <asm/assembler.h>
-#ifdef CONFIG_KEXEC_HARDBOOT
   #include <asm/kexec.h>
-#endif
+  #include <asm/memory.h>
+
 	.arch	armv7-a
 /*
  * Debugging stuff
@@ -138,7 +138,9 @@ start:
 		.word	_edata			@ zImage end address
  THUMB(		.thumb			)
 1:		mov	r7, r1			@ save architecture ID
-		mov	r8, r2			@ save atags pointer
+		teq	r0, #0			@ Check for kexec_boot_atags.
+		movne	r8, r0			@ Save kexec_boot_tags.
+		moveq	r8, r2			@ save atags pointer
 
 #ifdef CONFIG_KEXEC_HARDBOOT
 		/* Check hardboot page for a kexec kernel. */
@@ -151,6 +153,47 @@ start:
 		/* Clear hardboot page magic to avoid boot loop. */
 		mov	r0, #0
 		str	r0, [r3]
+
+		/*
+		 * Copy dtb from location up high in memory to default location.
+		 * Kernel freezes if this is not done.
+		 */
+		ldr	r1, [r3, #12]			@ kexec_boot_atags
+		ldr	r2, [r3, #16]			@ kexec_boot_atags_len
+		mov	r5, #0					@ iterator
+catags_cpy:
+		ldr	r0, [r1, r5]			@ from kexec_boot_atags
+		str	r0, [r8, r5]			@ to atags_pointer
+		add	r5, r5, #4
+		cmp	r5, r2
+		blo	catags_cpy
+
+#ifdef KEXEC_HB_KERNEL_LOC
+		/*
+		 * Copy kernel from location up high in memory to location in first 128MB.
+		 * Bootloader on hammerhead erases first 128MB of ram on reboot, so it can't
+		 * be in there before reboot, but decompressing in location above 128MB takes
+		 * a long time. This memcpy is much quicker, for some reason.
+		 */
+		ldr	r2, [r3, #4]				@ kexec_start_address
+		ldr	r4, [r3, #20]				@ kexec_kernel_len
+		ldr	r6, =KEXEC_HB_KERNEL_LOC    @ target
+		mov	r5, #0						@ iterator
+kernel_cpy:
+		ldr	r0, [r2, r5]				@ from kexec_start_address
+		str	r0, [r6, r5]				@ to KEXEC_HB_KERNEL_LOC
+		add	r5, r5, #4
+		cmp	r5, r4
+		blo	kernel_cpy
+#else
+		ldr	r6, [r3, #4]				@ kexec_start_address
+#endif
+
+		/* set registers and boot kexecd' kernel */
+		mov	r0, #0
+		ldr	r1, [r3, #8]				@ kexec_mach_type
+		mov	r2, r8						@ atags pointer
+		mov	pc, r6
 
 /* Copy the kernel tagged list (atags):
  *
@@ -214,18 +257,13 @@ catags_empty:
 		bcc	no_atags_cpy
 
 		mov	r5, #0					@ iterator
-catags_cpy:
-		ldr	r0, [r8, r5]
-		str	r0, [r2, r5]
-		add	r5, r5, #4
-		cmp	r5, r4
-		blo	catags_cpy
+
 
 no_atags_cpy:
 		/* Load boot arguments and jump to kexec kernel. */
-		ldr	r0, [r3, #12]			@ kexec_boot_atags (r2: boot_atags)
-		ldr	r1, [r3, #8]			@ kexec_mach_type
-		ldr	pc, [r3, #4]			@ kexec_start_address
+		ldr	r0, [r3, #12]	@ kexec_boot_atags (r2: boot_atags)
+		ldr	r1, [r3, #8]	@ kexec_mach_type
+		ldr	pc, [r3, #4]	@ kexec_start_address
 
 		.ltorg
 
@@ -487,7 +525,6 @@ wont_overwrite:
  *   sp  = stack pointer
  */
 		orrs	r1, r0, r5
-
 		beq	not_relocated
 
 		add	r11, r11, r0
@@ -501,7 +538,6 @@ wont_overwrite:
 		 */
 		add	r2, r2, r0
 		add	r3, r3, r0
-
 
 		/*
 		 * Relocate all entries in the GOT table.
@@ -601,26 +637,7 @@ call_kernel:
  ARM(		mov	pc, r4	)		@ call kernel
  THUMB(		bx	r4	)		@ entry point is always ARM
 
-#ifdef CONFIG_ARM_VIRT_EXT
-		mrs	r0, spsr		@ Get saved CPU boot mode
-		and	r0, r0, #MODE_MASK
-		cmp	r0, #HYP_MODE		@ if not booted in HYP mode...
-		bne	__enter_kernel		@ boot kernel directly
-
-		adr	r12, .L__hyp_reentry_vectors_offset
-		ldr	r0, [r12]
-		add	r0, r0, r12
-
-		bl	__hyp_set_vectors
-		__HVC(0)			@ otherwise bounce to hyp mode
-
-		b	.			@ should never be reached
-
-		.align	2
-.L__hyp_reentry_vectors_offset:	.long	__hyp_reentry_vectors - .
-#else
-		b	__enter_kernel
-#endif
+		.ltorg
 
 		.align	2
 		.type	LC0, #object
@@ -1414,25 +1431,6 @@ memdump:	mov	r12, r0
 #endif
 
 		.ltorg
-
-#ifdef CONFIG_ARM_VIRT_EXT
-.align 5
-__hyp_reentry_vectors:
-		W(b)	.			@ reset
-		W(b)	.			@ undef
-		W(b)	.			@ svc
-		W(b)	.			@ pabort
-		W(b)	.			@ dabort
-		W(b)	__enter_kernel		@ hyp
-		W(b)	.			@ irq
-		W(b)	.			@ fiq
-#endif /* CONFIG_ARM_VIRT_EXT */
-
-__enter_kernel:
-		mov	r0, #0			@ must be 0
- ARM(		mov	pc, r4	)		@ call kernel
- THUMB(		bx	r4	)		@ entry point is always ARM
-
 reloc_code_end:
 
 		.align

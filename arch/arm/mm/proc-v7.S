@@ -52,13 +52,16 @@ ENDPROC(cpu_v7_proc_fin)
  *	This code must be executed using a flat identity mapping with
  *      caches disabled.
  */
-	.align	5
+
 	.pushsection	.idmap.text, "ax"
+	.align	5
 ENTRY(cpu_v7_reset)
-	mrc	p15, 0, r1, c1, c0, 0		@ ctrl register
-	bic	r1, r1, #0x1			@ ...............m
- THUMB(	bic	r1, r1, #1 << 30 )		@ SCTLR.TE (Thumb exceptions)
-	mcr	p15, 0, r1, c1, c0, 0		@ disable MMU
+	sub	  pc, pc, #PAGE_OFFSET+4	    @ go to physical addresses
+	mrc	  p15, 0, ip, c1, c0, 0		    @ ctrl register
+	bic	  ip, ip, #0x0001			    @ ...............m
+	mcr	  p15, 0, ip, c1, c0, 0		    @ ctrl register
+ THUMB(	bic	r1, r1, #1 << 30 )	    @ SCTLR.TE (Thumb exceptions)
+	mcr	  p15, 0, r1, c1, c0, 0		    @ disable MMU
 	mcr     p15, 0, ip, c8, c7, 0           @ invalidate I & D,flush TLB
 	mcr     p15, 0, ip, c7, c5, 6           @ flush BTC
 	dsb
@@ -66,7 +69,6 @@ ENTRY(cpu_v7_reset)
 	mov	pc, r0
 ENDPROC(cpu_v7_reset)
 	.popsection
-
 /*
  *	cpu_v7_do_idle()
  *
@@ -414,6 +416,16 @@ __v7_ca15mp_proc_info:
 	.long	0xff0ffff0
 	__v7_proc __v7_ca15mp_setup, hwcaps = HWCAP_IDIV
 	.size	__v7_ca15mp_proc_info, . - __v7_ca15mp_proc_info
+
+	/*
+	 * Qualcomm Inc. Krait processors.
+	 */
+	.type	__krait_proc_info, #object
+__krait_proc_info:
+	.long	0x510f0400		@ Required ID value
+	.long	0xff0ffc00		@ Mask for ID
+	__v7_proc __v7_setup, hwcaps = HWCAP_IDIV
+	.size	__krait_proc_info, . - __krait_proc_info
 
 	/*
 	 * Match any ARMv7 processor core.

@@ -24,8 +24,10 @@
 #include <linux/mfd/pmic8058.h>
 #include <linux/mfd/pmic8901.h>
 #include <linux/mfd/pm8xxx/misc.h>
+#include <linux/qpnp/power-on.h>
 
 #include <asm/mach-types.h>
+#include <asm/cacheflush.h>
 
 #include <mach/msm_iomap.h>
 #include <mach/restart.h>
@@ -39,6 +41,12 @@
 #include <mach/scm.h>
 #include "msm_watchdog.h"
 #include "timer.h"
+#include "wdog_debug.h"
+
+#ifdef CONFIG_KEXEC_HARDBOOT
+#include <asm/kexec.h>
+#endif
+
 
 #define WDT0_RST	0x38
 #define WDT0_EN		0x40
@@ -49,28 +57,32 @@
 
 #define RESTART_REASON_ADDR 0x65C
 #define DLOAD_MODE_ADDR     0x0
+#define EMERGENCY_DLOAD_MODE_ADDR    0xFE0
+#define EMERGENCY_DLOAD_MAGIC1    0x322A4F99
+#define EMERGENCY_DLOAD_MAGIC2    0xC67E4350
+#define EMERGENCY_DLOAD_MAGIC3    0x77777777
 
 #define SCM_IO_DISABLE_PMIC_ARBITER	1
 
-#ifdef CONFIG_LGE_CRASH_HANDLER
-#define LGE_ERROR_HANDLER_MAGIC_NUM	0xA97F2C46
-#define LGE_ERROR_HANDLER_MAGIC_ADDR	0x18
-void *lge_error_handler_cookie_addr;
-static int ssr_magic_number = 0;
+#ifdef CONFIG_MSM_RESTART_V2
+#define use_restart_v2()	1
+#else
+#define use_restart_v2()	0
 #endif
 
 static int restart_mode;
 #ifndef CONFIG_SEC_DEBUG
 void *restart_reason;
 #endif
-int kernel_sec_get_debug_level(void);
-#define KERNEL_SEC_DEBUG_LEVEL_LOW      (0x574F4C44)
+
 int pmic_reset_irq;
 static void __iomem *msm_tmr0_base;
 
 #ifdef CONFIG_MSM_DLOAD_MODE
 static int in_panic;
 static void *dload_mode_addr;
+static bool dload_mode_enabled;
+static void *emergency_dload_mode_addr;
 
 /* Download mode master kill-switch */
 static int dload_set(const char *val, struct kernel_param *kp);
@@ -89,7 +101,7 @@ static struct notifier_block panic_blk = {
 	.notifier_call	= panic_prep_restart,
 };
 
-static void set_dload_mode(int on)
+void set_dload_mode(int on)
 {
 	if (dload_mode_addr) {
 		__raw_writel(on ? 0xE47B337D : 0, dload_mode_addr);
@@ -100,19 +112,36 @@ static void set_dload_mode(int on)
 				lge_error_handler_cookie_addr);
 #endif
 		mb();
+		dload_mode_enabled = on;
 #ifdef CONFIG_SEC_DEBUG
 		pr_err("set_dload_mode <%d> ( %x )\n", on,
 					(unsigned int) CALLER_ADDR0);
 #endif
 	}
 }
-#ifdef CONFIG_SEC_DEBUG
-void sec_debug_set_qc_dload_magic(int on)
+EXPORT_SYMBOL(set_dload_mode);
+
+#if 0
+static bool get_dload_mode(void)
 {
-	pr_info("%s: on=%d\n", __func__, on);
-	set_dload_mode(on);
+	return dload_mode_enabled;
 }
 #endif
+
+static void enable_emergency_dload_mode(void)
+{
+	if (emergency_dload_mode_addr) {
+		__raw_writel(EMERGENCY_DLOAD_MAGIC1,
+				emergency_dload_mode_addr);
+		__raw_writel(EMERGENCY_DLOAD_MAGIC2,
+				emergency_dload_mode_addr +
+				sizeof(unsigned int));
+		__raw_writel(EMERGENCY_DLOAD_MAGIC3,
+				emergency_dload_mode_addr +
+				(2 * sizeof(unsigned int)));
+		mb();
+	}
+}
 
 static int dload_set(const char *val, struct kernel_param *kp)
 {
@@ -138,7 +167,21 @@ static int dload_set(const char *val, struct kernel_param *kp)
 	return 0;
 }
 #else
-#define set_dload_mode(x) do {} while (0)
+void set_dload_mode(int on)
+{
+	do {} while (0);
+}
+EXPORT_SYMBOL(set_dload_mode);
+
+static void enable_emergency_dload_mode(void)
+{
+	printk(KERN_ERR "dload mode is not enabled on target\n");
+}
+
+static bool get_dload_mode(void)
+{
+	return false;
+}
 #endif
 
 void msm_set_restart_mode(int mode)
@@ -151,16 +194,47 @@ void msm_set_restart_mode(int mode)
 }
 EXPORT_SYMBOL(msm_set_restart_mode);
 
+static bool scm_pmic_arbiter_disable_supported;
+/*
+ * Force the SPMI PMIC arbiter to shutdown so that no more SPMI transactions
+ * are sent from the MSM to the PMIC.  This is required in order to avoid an
+ * SPMI lockup on certain PMIC chips if PS_HOLD is lowered in the middle of
+ * an SPMI transaction.
+ */
+static void halt_spmi_pmic_arbiter(void)
+{
+	if (scm_pmic_arbiter_disable_supported) {
+		pr_crit("Calling SCM to disable SPMI PMIC arbiter\n");
+		scm_call_atomic1(SCM_SVC_PWR, SCM_IO_DISABLE_PMIC_ARBITER, 0);
+	}
+}
+
 static void __msm_power_off(int lower_pshold)
 {
 	printk(KERN_CRIT "Powering off the SoC\n");
+
+#ifdef USE_RESTART_REASSON_DDR
+	if(restart_reason_ddr_address) {
+		/* Clear the stale magic number present in DDR restart reason address*/
+		__raw_writel(0x00000000, restart_reason_ddr_address);
+		printk(KERN_NOTICE "%s: Clearing the stale restart_reason: 0x%x \n", __func__,__raw_readl(restart_reason_ddr_address));
+	}
+#endif
+
 #ifdef CONFIG_MSM_DLOAD_MODE
 	set_dload_mode(0);
 #endif
 	pm8xxx_reset_pwr_off(0);
+	qpnp_pon_system_pwr_off(PON_POWER_OFF_SHUTDOWN);
 
 	if (lower_pshold) {
+		if (!use_restart_v2()) {
 		__raw_writel(0, PSHOLD_CTL_SU);
+		} else {
+			halt_spmi_pmic_arbiter();
+			__raw_writel(0, MSM_MPM2_PSHOLD_BASE);
+		}
+
 		mdelay(10000);
 		printk(KERN_ERR "Powering off has failed\n");
 	}
@@ -214,46 +288,12 @@ static irqreturn_t resout_irq_handler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-#ifdef CONFIG_LGE_CRASH_HANDLER
-#define SUBSYS_NAME_MAX_LENGTH	40
-
-int get_ssr_magic_number(void)
-{
-	return ssr_magic_number;
-}
-
-void set_ssr_magic_number(const char* subsys_name)
-{
-	int i;
-	const char *subsys_list[] = {
-		"modem", "riva", "dsps", "lpass",
-		"external_modem", "gss",
-	};
-
-	ssr_magic_number = (0x6d630000 | 0x0000f000);
-
-	for (i=0; i < ARRAY_SIZE(subsys_list); i++) {
-		if (!strncmp(subsys_list[i], subsys_name,
-					SUBSYS_NAME_MAX_LENGTH)) {
-			ssr_magic_number = (0x6d630000 | ((i+1)<<12));
-			break;
-		}
-	}
-}
-
-void set_kernel_crash_magic_number(void)
-{
-	pet_watchdog();
-	if (ssr_magic_number == 0)
-		__raw_writel(0x6d630100, restart_reason);
-	else
-		__raw_writel(restart_mode, restart_reason);
-}
-#endif /* CONFIG_LGE_CRASH_HANDLER */
-
-void msm_restart(char mode, const char *cmd)
+static void msm_restart_prepare(const char *cmd)
 {
 	unsigned long value;
+#ifdef USE_RESTART_REASSON_DDR
+	unsigned int save_restart_reason;
+#endif
 
 #ifndef CONFIG_SEC_DEBUG
 #ifdef CONFIG_MSM_DLOAD_MODE
@@ -265,7 +305,7 @@ void msm_restart(char mode, const char *cmd)
 	set_dload_mode(in_panic);
 
 	/* Write download mode flags if restart_mode says so */
-	if (restart_mode == RESTART_DLOAD) {
+	if (restart_mode == RESTART_DLOAD)
 		set_dload_mode(1);
 #ifdef CONFIG_LGE_CRASH_HANDLER
 		writel(0x6d63c421, restart_reason);
@@ -298,6 +338,15 @@ void msm_restart(char mode, const char *cmd)
 	printk(KERN_NOTICE "Going down for restart now\n");
 
 	pm8xxx_reset_pwr_off(1);
+#if 0 //fixme
+	/* Hard reset the PMIC unless memory contents must be maintained. */
+	if (get_dload_mode() || (cmd != NULL && cmd[0] != '\0'))
+		qpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);
+	else
+		qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET);
+#else
+		qpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);
+#endif
 #ifdef CONFIG_SEC_DEBUG
 	if (!restart_reason)
 		restart_reason = ioremap_nocache((unsigned long)(MSM_IMEM_BASE \
@@ -325,17 +374,32 @@ void msm_restart(char mode, const char *cmd)
 		} else if (!strncmp(cmd, "debug", 5)
 				&& !kstrtoul(cmd + 5, 0, &value)) {
 			__raw_writel(0xabcd0000 | value, restart_reason);
-#ifdef CONFIG_SEC_SSR_DEBUG_LEVEL_CHK
 		} else if (!strncmp(cmd, "cpdebug", 7) /* set cp debug level */
 				&& !kstrtoul(cmd + 7, 0, &value)) {
 			__raw_writel(0xfedc0000 | value, restart_reason);
+#if defined(CONFIG_SWITCH_DUAL_MODEM)
+		} else if (!strncmp(cmd, "swsel", 5) /* set switch value */
+				&& !kstrtoul(cmd + 5, 0, &value)) {
+			__raw_writel(0xabce0000 | value, restart_reason);
 #endif
+		} else if (!strncmp(cmd, "nvbackup", 8)) {
+			__raw_writel(0x77665511, restart_reason);
+		} else if (!strncmp(cmd, "nvrestore", 9)) {
+			__raw_writel(0x77665512, restart_reason);
+		} else if (!strncmp(cmd, "nverase", 7)) {
+			__raw_writel(0x77665514, restart_reason);
+		} else if (!strncmp(cmd, "nvrecovery", 10)) {
+			__raw_writel(0x77665515, restart_reason);
+		} else if (!strncmp(cmd, "edl", 3)) {
+			enable_emergency_dload_mode();
 		} else if (strlen(cmd) == 0) {
 			printk(KERN_NOTICE "%s : value of cmd is NULL.\n", __func__);
 			__raw_writel(0x12345678, restart_reason);
 		} else {
 			__raw_writel(0x77665501, restart_reason);
 		}
+		printk(KERN_NOTICE "%s : restart_reason = 0x%x\n",
+				__func__, __raw_readl(restart_reason));
 	}
 #ifdef CONFIG_LGE_CRASH_HANDLER
 	if (in_panic == 1)
@@ -344,14 +408,36 @@ reset:
 #endif /* CONFIG_LGE_CRASH_HANDLER */
 #ifdef CONFIG_SEC_DEBUG
 	else {
-		printk(KERN_NOTICE "%s : clear reset flag\r\n", __func__);
+		printk(KERN_NOTICE "%s: clear reset flag\n", __func__);
 		__raw_writel(0x12345678, restart_reason);
 	}
 #endif
+
+#ifdef USE_RESTART_REASSON_DDR
+	if(restart_reason_ddr_address) {
+		 save_restart_reason = __raw_readl(restart_reason);
+		/* Writting NORMAL BOOT magic number to DDR address*/
+		__raw_writel(save_restart_reason, restart_reason_ddr_address);
+		printk(KERN_NOTICE "%s: writting 0x%x to DDR restart reason address \n", __func__,__raw_readl(restart_reason_ddr_address));
+	}
+#endif
+	flush_cache_all();
+	outer_flush_all();
+}
+
+void msm_restart(char mode, const char *cmd)
+{
+	printk(KERN_NOTICE "%s: Going down for restart now\n", __func__);
+
+	msm_restart_prepare(cmd);
+
+	if (!use_restart_v2()) {
 	__raw_writel(0, msm_tmr0_base + WDT0_EN);
-	if (!(machine_is_msm8x60_fusion() || machine_is_msm8x60_fusn_ffa())) {
+		if (!(machine_is_msm8x60_fusion() ||
+		      machine_is_msm8x60_fusn_ffa())) {
 		mb();
-		__raw_writel(0, PSHOLD_CTL_SU); /* Actually reset the chip */
+			 /* Actually reset the chip */
+			__raw_writel(0, PSHOLD_CTL_SU);
 		mdelay(5000);
 		pr_notice("PS_HOLD didn't work, falling back to watchdog\n");
 	}
@@ -360,6 +446,12 @@ reset:
 	__raw_writel(5*0x31F3, msm_tmr0_base + WDT0_BARK_TIME);
 	__raw_writel(0x31F3, msm_tmr0_base + WDT0_BITE_TIME);
 	__raw_writel(1, msm_tmr0_base + WDT0_EN);
+	} else {
+		/* Needed to bypass debug image on some chips */
+		msm_disable_wdog_debug();
+		halt_spmi_pmic_arbiter();
+		__raw_writel(0, MSM_MPM2_PSHOLD_BASE);
+	}
 
 	mdelay(10000);
 	printk(KERN_ERR "Restarting has failed\n");
@@ -377,16 +469,30 @@ static struct notifier_block dload_reboot_block = {
 };
 #endif
 
+#ifdef CONFIG_KEXEC_HARDBOOT
+void msm_kexec_hardboot(void)
+{
+#if defined(CONFIG_MSM_DLOAD_MODE) && !defined(CONFIG_SEC_DEBUG)
+ /* Do not enter download mode on reboot. */
+ set_dload_mode(0);
+#endif
+
+ /* Set PM8XXX PMIC to reset on power off. */
+ pm8xxx_reset_pwr_off(1);
+
+ /* Reboot with the recovery kernel since the boot kernel decompressor may
+ * not support the hardboot jump. */
+ __raw_writel(0x77665502, restart_reason);
+}
+#endif
+
+
 static int __init msm_pmic_restart_init(void)
 {
 	int rc;
 
-#if defined(CONFIG_MACH_JF_VZW) || defined(CONFIG_MACH_MELIUS)
+	if (use_restart_v2())
 	return 0;
-#else
-	if (kernel_sec_get_debug_level() != KERNEL_SEC_DEBUG_LEVEL_LOW)
-		return 0;
-#endif
 
 	if (pmic_reset_irq != 0) {
 		rc = request_any_context_irq(pmic_reset_irq,
@@ -424,6 +530,8 @@ static int __init msm_restart_init(void)
 		set_dload_mode(0);
 	} else
 #endif
+	emergency_dload_mode_addr = MSM_IMEM_BASE +
+		EMERGENCY_DLOAD_MODE_ADDR;
 	set_dload_mode(download_mode);
 #endif
 	msm_tmr0_base = msm_timer_get_timer0_base();
@@ -431,6 +539,11 @@ static int __init msm_restart_init(void)
 	restart_reason = MSM_IMEM_BASE + RESTART_REASON_ADDR;
 #endif
 	pm_power_off = msm_power_off;
+
+
+
+	if (scm_is_call_available(SCM_SVC_PWR, SCM_IO_DISABLE_PMIC_ARBITER) > 0)
+		scm_pmic_arbiter_disable_supported = true;
 
 	return 0;
 }

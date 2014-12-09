@@ -408,9 +408,17 @@ static int call_undef_hook(struct pt_regs *regs, unsigned int instr)
 
 asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 {
+	unsigned int correction = thumb_mode(regs) ? 2 : 4;
 	unsigned int instr;
 	siginfo_t info;
 	void __user *pc;
+
+	/*
+	 * According to the ARM ARM, PC is 2 or 4 bytes ahead,
+	 * depending whether we're in Thumb mode or not.
+	 * Correct this offset.
+	 */
+	regs->ARM_pc -= correction;
 
 	pc = (void __user *)instruction_pointer(regs);
 
@@ -769,6 +777,16 @@ baddataabort(int code, unsigned long instr, struct pt_regs *regs)
 
 	arm_notify_die("unknown data abort code", regs, &info, instr, 0);
 }
+
+void __attribute__((noreturn)) __bug(const char *file, int line)
+{
+	printk(KERN_CRIT"kernel BUG at %s:%d!\n", file, line);
+	*(int *)0 = 0;
+
+	/* Avoid "noreturn function does return" */
+	for (;;);
+}
+EXPORT_SYMBOL(__bug);
 
 void __readwrite_bug(const char *fn)
 {

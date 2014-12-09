@@ -3,11 +3,12 @@
  */
 
 #include <asm/kexec.h>
+
 #ifdef CONFIG_KEXEC_HARDBOOT
 #include <asm/memory.h>
-#if defined(CONFIG_ARCH_MSM8960) || defined(CONFIG_ARCH_APQ8064) 
-#include <mach/msm_iomap.h> 
-#endif 
+#ifdef CONFIG_ARCH_MSM8960
+#include <mach/msm_iomap.h>
+#endif
 #endif 
 /*
  * collection of needed assem code for kexec
@@ -40,7 +41,7 @@
 #endif
 #include <asm/thread_info.h>
 #include <asm/unwind.h>
-
+#include <asm/kexec.h>
 #include "../mm/proc-macros.S"
 
 #if 0
@@ -110,6 +111,7 @@ ENDPROC(kexec_cpu_v7_proc_fin)
 	.align	5
 	.pushsection	.idmap.text, "ax"
 ENTRY(cpu_v7_reset)
+	sub	pc, pc, #PAGE_OFFSET+4		@ go to physical addresses
 	mrc	p15, 0, r1, c1, c0, 0		@ ctrl register
 	bic	r1, r1, #0x1			@ ...............m
  THUMB(	bic	r1, r1, #1 << 30 )		@ SCTLR.TE (Thumb exceptions)
@@ -126,8 +128,26 @@ ENDPROC(cpu_v7_reset)
        .section .rodata, "a"
 
 	.align	3	/* not needed for this code, but keeps fncpy() happy */
-
+	.arm
 ENTRY(relocate_new_kernel)
+	/* We get here when the MMU is in a transitional state.
+	   Wait for the virtual address mapping to wear off before
+	   overwriting the identity mappings (set up for the sake
+	   of MMU disabling) with the previous mappings. */
+	ldr	r0, =100
+0:
+	subs	r0, r0, #1
+	beq	0b
+
+	adr	r0, kexec_mmu_ents
+	.rept 4
+	ldr	r1, [r0], #4
+	ldr	r2, [r0], #4
+	str	r2, [r1], #4
+	ldr	r2, [r0], #4
+	str	r2, [r1], #4
+	.endr
+
 	/* continue with relocate_new_kernel */
 
 	ldr	r0,kexec_indirection_page
@@ -175,11 +195,10 @@ ENTRY(relocate_new_kernel)
 	b 0b
 
 2:
-
 #ifdef CONFIG_KEXEC_HARDBOOT
-	ldr r0, kexec_hardboot
-	teq r0, #0
- 	bne hardboot
+	ldr	r0, kexec_hardboot
+	teq	r0, #0
+	bne	hardboot
 #endif
 
 	/* Jump to relocated kernel */
@@ -187,12 +206,13 @@ ENTRY(relocate_new_kernel)
 	mov r0,#0
 	ldr r1,kexec_mach_type
 	ldr r2,kexec_boot_atags
- ARM(	mov pc, lr	)
+ ARM(	ret lr	)
  THUMB(	bx lr		)
 ENDPROC(relocate_new_kernel) 
 	.align
-  #ifdef CONFIG_KEXEC_HARDBOOT
-   hardboot: 
+
+#ifdef CONFIG_KEXEC_HARDBOOT
+hardboot: 
           /* Stash boot arguments in hardboot page:
            *  0: KEXEC_HB_PAGE_MAGIC
            *  4: kexec_start_address
@@ -207,12 +227,12 @@ ENDPROC(relocate_new_kernel)
           ldr       r1, =KEXEC_HB_PAGE_MAGIC
           str       r1, [r0]
    
-   #if defined(CONFIG_ARCH_MSM8960) || defined(CONFIG_ARCH_APQ8064) || defined(CONFIG_ARCH_MSM8974) 
-   #if defined(CONFIG_ARCH_APQ8064) 
-   #define MSM_TLMM_PHYS APQ8064_TLMM_PHYS
-   #elif defined(CONFIG_ARCH_MSM8960)
-   #define MSM_TLMM_PHYS MSM8960_TLMM_PHYS
-   #endif
+#if defined(CONFIG_ARCH_MSM8960) || defined(CONFIG_ARCH_APQ8064) || defined(CONFIG_ARCH_MSM8974) 
+#if defined(CONFIG_ARCH_APQ8064) 
+#define MSM_TLMM_PHYS APQ8064_TLMM_PHYS
+#elif defined(CONFIG_ARCH_MSM8960)
+#define MSM_TLMM_PHYS MSM8960_TLMM_PHYS
+#endif
           /* Hard reset via PMIC, decompressor jumps to kernel. */
           ldr       r0, =MSM_TLMM_PHYS
           mov       r1, #0  
@@ -223,7 +243,7 @@ ENDPROC(relocate_new_kernel)
    #endif 
     
           .ltorg 
-   #endif 
+#endif
 
 	.align
 
@@ -234,6 +254,10 @@ kexec_start_address:
 	.globl kexec_indirection_page
 kexec_indirection_page:
 	.long	0x0
+	
+	.globl kexec_mmu_ents
+kexec_mmu_ents:
+	.space 4*12, 0
 
 	.globl kexec_mach_type
 kexec_mach_type:
@@ -245,6 +269,14 @@ kexec_boot_atags:
 	.long	0x0
 
 #ifdef CONFIG_KEXEC_HARDBOOT
+	.globl kexec_boot_atags_len
+kexec_boot_atags_len:
+	.long	0x0
+
+	.globl kexec_kernel_len
+kexec_kernel_len:
+	.long	0x0
+
 	.globl kexec_hardboot
 kexec_hardboot:
 	.long	0x0
