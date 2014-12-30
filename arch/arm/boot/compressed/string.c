@@ -6,7 +6,7 @@
 
 #include <linux/string.h>
 
-void *memcpy(void *__dest, __const void *__src, size_t __n)
+/*void *memcpy(void *__dest, __const void *__src, size_t __n)
 {
 	int i = 0;
 	unsigned char *d = (unsigned char *)__dest, *s = (unsigned char *)__src;
@@ -125,3 +125,4 @@ void __memzero(void *s, size_t count)
 {
 	memset(s, 0, count);
 }
+*/

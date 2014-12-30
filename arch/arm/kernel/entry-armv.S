@@ -240,7 +240,7 @@ svc_preempt:
 1:	bl	preempt_schedule_irq		@ irq en/disable is done inside
 	ldr	r0, [tsk, #TI_FLAGS]		@ get new tasks TI_FLAGS
 	tst	r0, #_TIF_NEED_RESCHED
-	moveq	pc, r8				@ go again
+	reteq   r8                              @ go again
 	b	1b
 #endif
 

@@ -16,6 +16,7 @@
 #include <linux/compiler.h>
 #include <linux/const.h>
 #include <linux/types.h>
+#include <mach/memory.h>
 #include <asm/sizes.h>
 
 #ifdef CONFIG_NEED_MACH_MEMORY_H
@@ -59,6 +60,7 @@
 #error Top of user space clashes with start of module space
 #endif
 
+#define KEXEC_HB_PAGE_ADDR UL(0x87E00000)
 /*
  * The highmem pkmap virtual space shares the end of the module area.
  */

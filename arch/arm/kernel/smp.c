@@ -16,6 +16,7 @@
 #include <linux/cache.h>
 #include <linux/profile.h>
 #include <linux/errno.h>
+#include <linux/ftrace.h>
 #include <linux/mm.h>
 #include <linux/err.h>
 #include <linux/cpu.h>
@@ -25,8 +26,8 @@
 #include <linux/percpu.h>
 #include <linux/clockchips.h>
 #include <linux/completion.h>
-
 #include <linux/atomic.h>
+#include <asm/atomic.h>
 #include <asm/cacheflush.h>
 #include <asm/cpu.h>
 #include <asm/cputype.h>
@@ -90,6 +91,7 @@ int __cpuinit __cpu_up(unsigned int cpu)
 		init_idle(idle, cpu);
 	}
 
+
 	/*
 	 * We need to tell the secondary core where to find
 	 * its stack and the page tables.
@@ -99,7 +101,6 @@ int __cpuinit __cpu_up(unsigned int cpu)
 	secondary_data.swapper_pg_dir = virt_to_phys(swapper_pg_dir);
 	__cpuc_flush_dcache_area(&secondary_data, sizeof(secondary_data));
 	outer_clean_range(__pa(&secondary_data), __pa(&secondary_data + 1));
-
 	/*
 	 * Now bring the CPU into our world.
 	 */
@@ -124,6 +125,14 @@ int __cpuinit __cpu_up(unsigned int cpu)
 	secondary_data.pgdir = 0;
 
 	return ret;
+}
+
+int platform_can_cpu_hotplug(void)
+{
+	if (!IS_ENABLED(CONFIG_HOTPLUG_CPU))
+		return 0;
+
+	return 1;
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
@@ -253,6 +262,8 @@ asmlinkage void __cpuinit secondary_start_kernel(void)
 {
 	struct mm_struct *mm = &init_mm;
 	unsigned int cpu = smp_processor_id();
+
+	printk("CPU%u: Booted secondary processor\n", cpu);
 
 	/*
 	 * All kernel threads share the same mm context; grab a

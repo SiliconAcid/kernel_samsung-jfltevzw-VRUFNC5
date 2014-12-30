@@ -1,0 +1,49 @@
+make clean
+make distclean
+mkdir build
+export PATH=$PATH:/home/surge/android/arm-eabi-4.7/bin
+export ARCH=arm
+export CROSS_COMPILE=arm-eabi-
+export PATH=${PATH}:/home/surge/android-sdk/tools
+export PATH=${PATH}:/home/surge/android-sdk/platform-tools
+export PATH=${PATH}:~/bin
+#export JAVA_HOME=/usr/lib/jvm/jdk1.7.0
+export CROSS_COMPILE=arm-eabi-
+export KERNEL_DIR=`pwd`
+export KERNELDIR=$KERNEL_DIR
+export ARCH=arm
+make ARCH=arm VARIANT_DEFCONFIG=jf_vzw_defconfig jf_defconfig SELINUX_DEFCONFIG=selinux_defconfig
+make  -j12 ARCH=arm zImage
+make  -j12 ARCH=arm modules
+/
+cp arch/arm/kernel/arm_kexec.ko build
+cp arch/arm/mach-msm/msm_kexec.ko build
+cp arch/arm/mvp/commkm/commkm.ko build
+cp kernel/kexec.ko build
+cp drivers/net/wireless/bcmdhd/dhd.ko build
+cp arch/arm/mvp/oektestkm/oektestkm.ko build
+cp drivers/scsi/scsi_wait_scan.ko build
+cp arch/arm/mvp/mvpkm/mvpkm.ko build
+cp arch/arm/mvp/pvtcpkm/pvtcpkm.ko build
+adb push build/oektestkm.ko /data/local/tmp
+adb push build/mvpkm.ko /data/local/tmp
+adb push build/pvtcpkm.ko /data/local/tmp
+adb push build/dhd.ko /data/local/tmp
+adb push build/kdump /data/local/tmp
+adb push build/arm_kexec.ko /data/local/tmp
+adb push build/scsi_wait_scan.ko /data/local/tmp
+adb push build/commkm.ko /data/local/tmp
+adb push build/msm_kexec.ko /data/local/tmp
+adb push build/setup.sh /data/local/tmp
+adb push build/kexec /data/local/tmp
+adb push build/zImage /data/local/tmp
+adb push build/atags /data/local/tmp
+adb push build/kexec.ko /data/local/tmp
+adb push build/vmcore-dmesg /data/local/tmp
+adb push build/push.sh /data/local/tmp
+
+adb shell
+cd /data/local/tmp 
+chmod 755 *.sh
+sh push.sh
+sh setup.sh
